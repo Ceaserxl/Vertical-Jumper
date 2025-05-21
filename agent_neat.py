@@ -6,14 +6,17 @@ import neat
 import pygame
 from neat.checkpoint import Checkpointer
 
-import env
-from env import WIDTH, HEIGHT, GREEN, RED, BLACK, WHITE, draw_text, JumperEnv, SENSOR_LABELS
+from env import WIDTH, HEIGHT, BLACK, WHITE, JumperEnv
 
 MAX_FRAMES = 1200
 STAGNATE_LIMIT = 600
 FPS = 60
 RESUME = True
-CHECKPOINT_PREFIX = "neat-checkpoint-"
+CHECKPOINT_DIR = "neat-checkpoints"
+CHECKPOINT_PREFIX = os.path.join(CHECKPOINT_DIR, "neat-checkpoint-")
+
+if not os.path.exists(CHECKPOINT_DIR):
+    os.makedirs(CHECKPOINT_DIR)
 
 generation_counter = 0
 best_score_ever = 0
@@ -21,6 +24,10 @@ network_mode = False
 
 class EarlyExitException(Exception):
     pass
+
+def find_latest_checkpoint(prefix):
+    files = glob.glob(f"{prefix}*")
+    return max(files, key=os.path.getctime) if files else None
 
 def color_from_sensor(norm_dist):
     r = int(255 * (1 - norm_dist))
@@ -72,23 +79,17 @@ def draw_network_sideways(surface, agent, cell_rect, node_alpha=160, edge_alpha=
             w = min(4, max(1, int(abs(weight) * 2)))
             pygame.draw.line(net_surface, col, (sx, sy), (dx, dy), w)
 
-    sensor_count = 8
     for i, k in enumerate(node_inputs):
         x, y = node_pos[k][0] - left, node_pos[k][1] - top
         color = (90, 130, 255, node_alpha)
-        if i >= num_inputs - sensor_count:
+        if i >= num_inputs - 8:  # last 8 inputs are sensors
             norm_dist = obs[i]
             color = (*color_from_sensor(norm_dist), node_alpha)
         pygame.draw.circle(net_surface, color, (int(x), int(y)), 16)
-        txt = pygame.font.SysFont(None, 14).render(str(i + 1), True, WHITE)
-        net_surface.blit(txt, (x - 7, y - 8))
 
     for i, k in enumerate(node_outputs):
         x, y = node_pos[k][0] - left, node_pos[k][1] - top
         pygame.draw.circle(net_surface, (100, 220, 220, node_alpha), (int(x), int(y)), 16)
-        label = ["←", "→", "⎵"][i]
-        txt = pygame.font.SysFont(None, 20).render(label, True, WHITE)
-        net_surface.blit(txt, (x - 8, y - 12))
 
     for k in node_hidden:
         x, y = node_pos[k][0] - left, node_pos[k][1] - top
@@ -96,17 +97,11 @@ def draw_network_sideways(surface, agent, cell_rect, node_alpha=160, edge_alpha=
 
     surface.blit(net_surface, (left, top))
 
-def find_latest_checkpoint(prefix):
-    files = glob.glob(f"{prefix}*")
-    return max(files, key=os.path.getctime) if files else None
-
 def eval_genomes(genomes, config):
     global generation_counter, best_score_ever, network_mode
 
     generation_counter += 1
-    pop_size = len(genomes)
-
-    env_obj = JumperEnv(agent_count=pop_size)
+    env_obj = JumperEnv(agent_count=len(genomes))
     obs_list = env_obj.reset()
 
     agents = []
@@ -134,13 +129,12 @@ def eval_genomes(genomes, config):
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
-                pygame.quit()
-                exit()
+                pygame.quit(); exit()
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_s:
                     raise EarlyExitException()
                 if event.key == pygame.K_v:
-                    env.SHOW_SENSORS = not env.SHOW_SENSORS
+                    env_obj.SHOW_SENSORS = not env_obj.SHOW_SENSORS
                 if event.key == pygame.K_n:
                     network_mode = not network_mode
 
@@ -162,6 +156,7 @@ def eval_genomes(genomes, config):
             agent['score'] += max(0, reward_list[i])
             agent['genome'].fitness += reward_list[i]
             agent['stagnate'] = 0 if reward_list[i] > 0 else agent['stagnate'] + 1
+
             if done_list[i] or agent['stagnate'] > STAGNATE_LIMIT:
                 agent['alive'] = False
 
@@ -180,15 +175,18 @@ def eval_genomes(genomes, config):
             best_score_ever = current_best_score
 
         pygame.display.set_caption(
-            f"NEAT Gen:{generation_counter} Alive:{sum(a['alive'] for a in agents)}/{pop_size} Best:{best_score_ever}"
+            f"NEAT Gen:{generation_counter} Alive:{sum(a['alive'] for a in agents)}/{len(agents)} Best:{int(best_score_ever)}"
         )
         pygame.display.flip()
         clock.tick(FPS)
 
 def run_neat(config_path):
     config = neat.Config(
-        neat.DefaultGenome, neat.DefaultReproduction,
-        neat.DefaultSpeciesSet, neat.DefaultStagnation, config_path
+        neat.DefaultGenome,
+        neat.DefaultReproduction,
+        neat.DefaultSpeciesSet,
+        neat.DefaultStagnation,
+        config_path
     )
 
     checkpoint_file = find_latest_checkpoint(CHECKPOINT_PREFIX)

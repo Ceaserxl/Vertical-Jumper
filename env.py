@@ -10,7 +10,6 @@ GREEN = (50, 200, 50)
 RED = (220, 50, 50)
 BLACK = (0, 0, 0)
 WHITE = (255, 255, 255)
-SHOW_SENSORS = False
 SENSOR_ANGLES = [0, 45, 90, 135, 180, 225, 270, 315]
 SENSOR_LABELS = ["E", "NE", "N", "NW", "W", "SW", "S", "SE"]
 
@@ -28,15 +27,9 @@ def wall_intersect(start, dx, dy, left, top, right, bottom, max_dist):
     x0, y0 = start
     t_vals = []
     if dx != 0:
-        t_left = (left - x0) / dx
-        if t_left > 0: t_vals.append(t_left)
-        t_right = (right - x0) / dx
-        if t_right > 0: t_vals.append(t_right)
+        t_vals.extend([(left - x0) / dx, (right - x0) / dx])
     if dy != 0:
-        t_top = (top - y0) / dy
-        if t_top > 0: t_vals.append(t_top)
-        t_bottom = (bottom - y0) / dy
-        if t_bottom > 0: t_vals.append(t_bottom)
+        t_vals.extend([(top - y0) / dy, (bottom - y0) / dy])
     min_t = max_dist
     for t in t_vals:
         if 0 < t < min_t:
@@ -58,25 +51,44 @@ class JumperEnv:
         self.platforms = []
         self.frame = 0
         self._sensor_rays = [[] for _ in range(agent_count)]
+        self.SHOW_SENSORS = False
 
     def create_platforms(self):
         plats = []
         y = HEIGHT
+        last_x = random.randint(0, WIDTH - PLATFORM_WIDTH)
+
         for _ in range(10):
-            gap = random.randint(60, 120)
+            gap = random.randint(40, 120)
             y -= gap
-            x = random.randint(0, WIDTH - PLATFORM_WIDTH)
+
+            min_dx, max_dx = 60, 180
+            dx = random.randint(min_dx, max_dx) * random.choice([-1, 1])
+            x = max(0, min(WIDTH - PLATFORM_WIDTH, last_x + dx))
             plats.append(pygame.Rect(x, y, PLATFORM_WIDTH, PLATFORM_HEIGHT))
+            last_x = x
+
         return plats
 
     def refill_platforms(self):
-        self.platforms = [p for p in self.platforms if p.y - self.scroll < HEIGHT + 50]
-        while len(self.platforms) < 10:
+        visible_top = self.scroll - 100
+        active_platforms = [p for p in self.platforms if p.y < visible_top + HEIGHT]
+
+        last_x = self.platforms[-1].x if self.platforms else random.randint(0, WIDTH - PLATFORM_WIDTH)
+
+        while len(active_platforms) < 10:
             top_y = min(p.y for p in self.platforms) if self.platforms else HEIGHT
-            gap = random.randint(60, 120)
+            gap = random.randint(40, 120)
             y = top_y - gap
-            x = random.randint(0, WIDTH - PLATFORM_WIDTH)
-            self.platforms.append(pygame.Rect(x, y, PLATFORM_WIDTH, PLATFORM_HEIGHT))
+
+            min_dx, max_dx = 60, 180
+            dx = random.randint(min_dx, max_dx) * random.choice([-1, 1])
+            x = max(0, min(WIDTH - PLATFORM_WIDTH, last_x + dx))
+
+            new_platform = pygame.Rect(x, y, PLATFORM_WIDTH, PLATFORM_HEIGHT)
+            self.platforms.append(new_platform)
+            active_platforms.append(new_platform)
+            last_x = x
 
     def reset(self):
         self.platforms = self.create_platforms()
@@ -115,10 +127,8 @@ class JumperEnv:
                 right = (action == 1)
                 jump = (action == 2)
 
-            if left:
-                player.x -= 5
-            if right:
-                player.x += 5
+            if left: player.x -= 5
+            if right: player.x += 5
             if jump and self.can_jump[i]:
                 self.vy[i] = -16
                 self.can_jump[i] = False
@@ -127,7 +137,12 @@ class JumperEnv:
             self.vy[i] = min(self.vy[i] + 0.5, 10)
             player.y += self.vy[i]
 
+            # Small penalty if below screen
             if player.y - self.scroll > HEIGHT:
+                rewards[i] -= 0.2
+
+            # Hard cap: kill agent if it falls too far
+            if player.y > self.scroll + HEIGHT:
                 rewards[i] -= 20.0
                 dones[i] = True
                 continue
@@ -138,15 +153,18 @@ class JumperEnv:
                     self.vy[i] = 0
                     self.can_jump[i] = True
                     if plat.y < self.highest_platform_y[i]:
-                        self.score[i] += 100
-                        rewards[i] += 100
+                        self.score[i] += 5
+                        rewards[i] += 5
                         self.highest_platform_y[i] = plat.y
                     if plat.y in self.history[i]:
-                        rewards[i] -= 1.0
+                        rewards[i] -= 0.2
                     self.history[i].append(plat.y)
                     if len(self.history[i]) > 10:
                         self.history[i].pop(0)
                     break
+
+            # Reward for survival
+            rewards[i] += 0.05
 
             observations[i] = self._get_obs(i)
 
@@ -159,19 +177,19 @@ class JumperEnv:
         cx = player.x + player.width // 2
         cy = player.y + player.height // 2
 
-        visible_top = self.scroll
-        visible_bottom = self.scroll + HEIGHT
+        visible_top = self.scroll - HEIGHT
+        visible_bottom = self.scroll + HEIGHT * 3
         max_sensor_length = 1000
         sensor_distances = []
-        if SHOW_SENSORS:
+        if self.SHOW_SENSORS:
             self._sensor_rays[i] = []
 
         for ang in SENSOR_ANGLES:
             dx = math.cos(math.radians(ang))
             dy = -math.sin(math.radians(ang))
-            wall_x, wall_y, wall_dist = wall_intersect((cx, cy), dx, dy, 0, visible_top, WIDTH, visible_bottom, max_sensor_length)
+            wx, wy, wall_dist = wall_intersect((cx, cy), dx, dy, 0, visible_top, WIDTH, visible_bottom, max_sensor_length)
             min_dist = wall_dist
-            hit_x, hit_y = wall_x, wall_y
+            hit_x, hit_y = wx, wy
 
             for step in range(10, int(max_sensor_length), 10):
                 x = cx + dx * step
@@ -188,10 +206,15 @@ class JumperEnv:
 
             norm = min(min_dist / max_sensor_length, 1.0)
             sensor_distances.append(norm)
-            if SHOW_SENSORS:
+            if self.SHOW_SENSORS:
                 self._sensor_rays[i].append((cx, cy, hit_x, hit_y, norm))
 
-        obs = [player.x / WIDTH, player.y / HEIGHT, self.vy[i] / 10.0, float(self.can_jump[i]), player.y / HEIGHT]
+        obs = [
+            player.x / WIDTH,
+            player.y / HEIGHT,
+            self.vy[i] / 10.0,
+            float(self.can_jump[i])
+        ]
         obs.extend(sensor_distances)
         return obs
 
@@ -204,7 +227,6 @@ class JumperEnv:
     def render(self, surface=None):
         surf = surface or pygame.display.get_surface()
         surf.fill(BLACK)
-
         pygame.draw.rect(surf, WHITE, (0, 0, WIDTH, HEIGHT), 3)
 
         for plat in self.platforms:
@@ -215,7 +237,7 @@ class JumperEnv:
             py = player.y - self.scroll
             pygame.draw.rect(surf, RED, (player.x, py, player.width, player.height))
 
-        if SHOW_SENSORS:
+        if self.SHOW_SENSORS:
             for rays in self._sensor_rays:
                 for sx, sy, ex, ey, norm_dist in rays:
                     r = int(255 * (1 - norm_dist))
@@ -225,4 +247,3 @@ class JumperEnv:
                     ey_disp = ey - self.scroll
                     pygame.draw.line(surf, color, (sx, sy_disp), (ex, ey_disp), 2)
                     pygame.draw.circle(surf, color, (int(ex), int(ey_disp)), 4)
-
